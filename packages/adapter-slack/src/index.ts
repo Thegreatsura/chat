@@ -1569,14 +1569,25 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
    * unscoped global key, which can bleed one tenant's cached profiles and
    * mention resolution into another when the same process posts for multiple
    * workspaces.
+   *
+   * Also pass `botUserId` (the installation's `botUserId`) in multi-workspace
+   * deployments. The adapter has no fixed bot user ID in that mode, so without
+   * it `adapter.botUserId` is `undefined` inside `fn` and the bot's own
+   * messages are parsed with `author.isMe: false`. When provided, it takes
+   * precedence over the adapter's configured or `auth.test` bot user ID. It is
+   * never inherited from an outer `withBotToken` call.
    */
   withBotToken<T>(
     token: string,
     fn: () => T,
-    options?: { installationId?: string }
+    options?: { installationId?: string; botUserId?: string }
   ): T {
     return this.requestContext.run(
-      { token, installationId: options?.installationId },
+      {
+        token,
+        installationId: options?.installationId,
+        botUserId: options?.botUserId,
+      },
       fn
     );
   }
