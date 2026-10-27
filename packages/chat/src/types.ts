@@ -2810,7 +2810,10 @@ export type InstallationAction =
   | "remove"
   | "remove-upgrade";
 
-/** Installation lifecycle metadata. Currently emitted by the Teams adapter. */
+/**
+ * Installation lifecycle metadata. Currently emitted by the Teams adapter, and
+ * by the Slack adapter for uninstalls.
+ */
 export interface InstallationEvent {
   action: InstallationAction;
   adapter: Adapter;
@@ -2820,12 +2823,20 @@ export interface InstallationEvent {
    * Absent only when the platform supplied no way to reach the conversation.
    */
   channelId?: string;
-  /** Platform conversation ID identifying the installation location. */
+  /**
+   * Platform ID identifying the installation location. Teams sends the
+   * conversation ID. Slack sends the installation key, the `team_id` or the
+   * `enterprise_id` for org-wide installs, which is not a channel.
+   */
   conversationId: string;
   /** Platform activity ID, useful for application-level idempotency. */
   id: string;
   locale?: string;
   raw: unknown;
+  /**
+   * Organization the installation belongs to: the Microsoft Entra tenant ID
+   * on Teams, or the Enterprise Grid `enterprise_id` on Slack.
+   */
   tenantId?: string;
   /** Actor who installed or removed the bot, distinct from the bot itself. */
   userId?: string;

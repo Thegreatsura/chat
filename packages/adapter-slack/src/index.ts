@@ -309,6 +309,14 @@ const MAYBE_APPLIED_ERRORS = new Set([
   "request_timeout",
   "service_unavailable",
 ]);
+/**
+ * Events Slack sends after revoking the app's tokens. The installation may
+ * already be gone, and its token is useless, so they skip token resolution.
+ */
+const TOKEN_LIFECYCLE_EVENT_TYPES = new Set([
+  "app_uninstalled",
+  "tokens_revoked",
+]);
 /** Fenced code block delimiter: up to three spaces, then 3+ backticks or tildes. */
 const FENCE_LINE_PATTERN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const TABLE_ROW_PATTERN = /^\|.*\|$/;
@@ -1704,6 +1712,35 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
   }
 
   /**
+   * Extract installation info from an event_callback envelope.
+   * For Enterprise Grid org-wide installs, returns enterprise_id; otherwise team_id.
+   */
+  protected extractInstallationFromEvent(payload: SlackWebhookPayload): {
+    installationId: string;
+    isEnterpriseInstall: boolean;
+    enterpriseId?: string;
+    teamId?: string;
+  } | null {
+    // Prefer authorizations[0] — Slack documents it as the authoritative
+    // installation identity for the event; the top-level fields can name a
+    // different (e.g. Slack Connect-ed) workspace. Fall back to top-level
+    // for payloads that omit authorizations (some event types, forwarded
+    // socket events from older listeners).
+    const auth = payload.authorizations?.[0];
+    const isEnterpriseInstall = Boolean(
+      auth?.is_enterprise_install ?? payload.is_enterprise_install
+    );
+    const enterpriseId =
+      (auth?.enterprise_id || payload.enterprise_id) ?? undefined;
+    const teamId = (auth?.team_id || payload.team_id) ?? undefined;
+    const installationId = isEnterpriseInstall ? enterpriseId : teamId;
+    if (!installationId) {
+      return null;
+    }
+    return { installationId, isEnterpriseInstall, enterpriseId, teamId };
+  }
+
+  /**
    * Resolve the multi-workspace request context for an event_callback
    * payload. Shared by the HTTP webhook path and the socket-mode path so
    * both resolve per-installation tokens the same way.
@@ -1711,8 +1748,8 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
    * Returns:
    * - the resolved context to run the event under,
    * - `"not-applicable"` when no resolution is needed (single-workspace
-   *   mode, or the payload carries no installation ID) — process without
-   *   a request context,
+   *   mode, a token lifecycle event, or the payload carries no installation ID) —
+   *   process without a request context,
    * - `"unresolved"` when an installation ID was present but no
    *   installation was found — drop the event.
    */
@@ -1735,23 +1772,16 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
     if (this.defaultBotTokenProvider || payload.type !== "event_callback") {
       return "not-applicable";
     }
-
-    // Prefer authorizations[0] — Slack documents it as the authoritative
-    // installation identity for the event; the top-level fields can name a
-    // different (e.g. Slack Connect-ed) workspace. Fall back to top-level
-    // for payloads that omit authorizations (some event types, forwarded
-    // socket events from older listeners).
-    const auth = payload.authorizations?.[0];
-    const isEnterpriseInstall = Boolean(
-      auth?.is_enterprise_install ?? payload.is_enterprise_install
-    );
-    const enterpriseId =
-      (auth?.enterprise_id || payload.enterprise_id) ?? undefined;
-    const teamId = (auth?.team_id || payload.team_id) ?? undefined;
-    const installationId = isEnterpriseInstall ? enterpriseId : teamId;
-    if (!installationId) {
+    if (TOKEN_LIFECYCLE_EVENT_TYPES.has(payload.event?.type ?? "")) {
       return "not-applicable";
     }
+
+    const installation = this.extractInstallationFromEvent(payload);
+    if (!installation) {
+      return "not-applicable";
+    }
+    const { enterpriseId, installationId, isEnterpriseInstall, teamId } =
+      installation;
 
     const ctx = await this.resolveTokenForTeam(
       installationId,
@@ -2232,6 +2262,8 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
           event as SlackMemberJoinedChannelEvent,
           options
         );
+      } else if (event.type === "app_uninstalled") {
+        this.handleAppUninstalled(payload, options);
       } else if (event.type === "user_change") {
         this.handleUserChange(event as SlackUserChangeEvent);
       }
@@ -3793,6 +3825,46 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
         }),
         inviterId: event.inviter,
         adapter: this,
+      },
+      options
+    );
+  }
+
+  /**
+   * Handle app_uninstalled events from Slack.
+   * Fires once the app is completely uninstalled from a workspace, or from an
+   * org for org-wide installs. tokens_revoked is not an uninstall: Slack also
+   * sends it when a user token or the bot token is revoked while the app
+   * stays installed.
+   */
+  protected handleAppUninstalled(
+    payload: SlackWebhookPayload,
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      this.logger.warn(
+        "Chat instance not initialized, ignoring app_uninstalled"
+      );
+      return;
+    }
+    const installation = this.extractInstallationFromEvent(payload);
+    if (!installation) {
+      this.logger.warn("Ignoring app_uninstalled: missing installation id");
+      return;
+    }
+
+    this.chat.processUninstalled?.(
+      {
+        action: "remove",
+        adapter: this,
+        // Slack installs belong to a workspace or org, not a conversation, so
+        // use the key setInstallation and deleteInstallation take.
+        conversationId: installation.installationId,
+        id: payload.event_id ?? "",
+        raw: payload,
+        ...(installation.enterpriseId
+          ? { tenantId: installation.enterpriseId }
+          : {}),
       },
       options
     );
