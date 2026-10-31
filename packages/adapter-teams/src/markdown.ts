@@ -233,6 +233,10 @@ function teamsHtmlToPlainText(teamsText: string): string {
 }
 
 export class TeamsFormatConverter extends BaseFormatConverter {
+  // Messages are sent with textFormat "markdown", where an unindented line
+  // ends the list item it belongs to.
+  protected override indentListContinuationLines = true;
+
   /**
    * Render text messages while preserving raw strings.
    */
